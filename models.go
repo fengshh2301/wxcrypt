@@ -1,6 +1,6 @@
 package wxopencrypt
 
-type VerifyTicket struct {
+type VerifyTicketEncrypt struct {
 	AppId   string
 	Encrypt string
 }
