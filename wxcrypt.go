@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"sort"
 )
 
@@ -101,104 +104,67 @@ func (this *WXBizMsgCrypt) DecryptMsg(sMsgSignature string, sTimeStamp string, s
 	return
 }
 
-/*
-int WXBizMsgCrypt::EncryptMsg(const std::string &sReplyMsg,
-	const std::string &sTimeStamp,
-	const std::string &sNonce,
-	std::string &sEncryptMsg)
-{
-if(0 == sReplyMsg.size())
-{
-return WXBizMsgCrypt_ParseXml_Error;
+func (this *WXBizMsgCrypt) EncryptMsg(sReplyMsg string, sTimeStamp string, sNonce string) (ret int, sEncryptMsg string) {
+	if 0 == len(sReplyMsg) {
+		ret = WXBizMsgCrypt_ParseXml_Error
+		return
+	}
+
+	//1.add rand str ,len, appid
+	// var sNeedEncrypt = this.GenNeedEncryptData(sReplyMsg)
+	// sNeedEncrypt += ""
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.BigEndian, int32(len(sReplyMsg))); err != nil {
+		ret = -1
+		return
+	}
+	iMsgLen := buf.Bytes()
+	randBytes := make([]byte, kRandEncryptStrLen)
+	if _, err := io.ReadFull(rand.Reader, randBytes); err != nil {
+		ret = -1
+		return
+	}
+	sNeedEncrypt := bytes.Join([][]byte{randBytes, iMsgLen, []byte(sReplyMsg), []byte(this.m_sAppid)}, nil)
+
+	//2. AES Encrypt
+	// var sAesData string
+	// var sAesKey string
+	// if 0 != GenAesKeyFromEncodingKey(this.m_sEncodingAESKey, sAesKey) {
+	// 	ret = WXBizMsgCrypt_IllegalAesKey
+	// 	return
+	// }
+	// if 0 != AES_CBCEncrypt(sNeedEncrypt, sAesKey, &sAesData) {
+	// 	ret = WXBizMsgCrypt_EncryptAES_Error
+	// 	return
+	// }
+	sAesData := EncodeInPKCS7(sNeedEncrypt)
+	c, err := aes.NewCipher(this.m_sKey)
+	if err != nil {
+		ret = WXBizMsgCrypt_EncryptAES_Error
+		return
+	}
+	cbc := cipher.NewCBCEncrypter(c, this.m_sIv)
+	cbc.CryptBlocks(sAesData, sAesData)
+
+	//3. base64Encode
+	sBase64Data := base64.StdEncoding.EncodeToString(sAesData)
+
+	//4. compute signature
+	ret4, sSignature := this.ComputeSignature(this.m_sToken, sTimeStamp, sNonce, sBase64Data)
+	if 0 != ret4 {
+		ret = WXBizMsgCrypt_ComputeSignature_Error
+		return
+	}
+
+	//5. Gen xml
+	ret, sEncryptMsg = this.GenReturnXml(sBase64Data, sSignature, sTimeStamp, sNonce)
+	if 0 != ret {
+		ret = WXBizMsgCrypt_GenReturnXml_Error
+		return
+	}
+	ret = WXBizMsgCrypt_OK
+	return
 }
-
-//1.add rand str ,len, appid
-std::string sNeedEncrypt;
-GenNeedEncryptData(sReplyMsg,sNeedEncrypt);
-
-//2. AES Encrypt
-std::string sAesData;
-std::string sAesKey;
-if(0 != GenAesKeyFromEncodingKey(m_sEncodingAESKey,sAesKey))
-{
-return WXBizMsgCrypt_IllegalAesKey;
-}
-if(0 != AES_CBCEncrypt(sNeedEncrypt, sAesKey, &sAesData))
-{
-return WXBizMsgCrypt_EncryptAES_Error;
-}
-
-//3. base64Encode
-std::string sBase64Data;
-if( 0!= EncodeBase64(sAesData,sBase64Data) )
-{
-return WXBizMsgCrypt_EncodeBase64_Error;
-}
-
-//4. compute signature
-std::string sSignature;
-if(0!=ComputeSignature(m_sToken, sTimeStamp, sNonce, sBase64Data, sSignature))
-{
-return WXBizMsgCrypt_ComputeSignature_Error;
-}
-
-//5. Gen xml
-if(0 != GenReturnXml(sBase64Data, sSignature, sTimeStamp, sNonce, sEncryptMsg) )
-{
-return WXBizMsgCrypt_GenReturnXml_Error ;
-}
-return WXBizMsgCrypt_OK;
-}
-
-int WXBizMsgCrypt::AES_CBCEncrypt( const std::string & objSource,
-const std::string & objKey, std::string * poResult )
-{
-return AES_CBCEncrypt( objSource.data(), objSource.size(),
-objKey.data(), objKey.size(), poResult );
-}
-
-int WXBizMsgCrypt::AES_CBCEncrypt( const char * sSource, const uint32_t iSize,
-const char * sKey,  uint32_t iKeySize, std::string * poResult )
-{
-if ( !sSource || !sKey || !poResult || iSize <= 0)
-{
-return -1;
-}
-
-poResult->clear();
-
-int padding = kAesKeySize - iSize % kAesKeySize;
-
-char * tmp = (char*)malloc( iSize + padding );
-if(NULL == tmp)
-{
-return -1;
-}
-memcpy( tmp, sSource, iSize );
-memset( tmp + iSize, padding, padding );
-
-unsigned char * out = (unsigned char*)malloc( iSize + padding );
-if(NULL == out)
-{
-FREE_PTR(tmp);
-return -1;
-}
-
-unsigned char key[ kAesKeySize ] = { 0 };
-unsigned char iv[ kAesIVSize ] = { 0 };
-memcpy( key, sKey, iKeySize > kAesKeySize ? kAesKeySize : iKeySize );
-memcpy(iv, key, sizeof(iv) < sizeof(key) ? sizeof(iv) : sizeof(key));
-
-AES_KEY aesKey;
-AES_set_encrypt_key( key, 8 * kAesKeySize, &aesKey );
-AES_cbc_encrypt((unsigned char *)tmp, out,iSize + padding,  &aesKey, iv, AES_ENCRYPT);
-poResult->append((char*)out, iSize + padding);
-
-FREE_PTR(tmp);
-FREE_PTR(out);
-return 0;
-}
-*/
 
 func (this *WXBizMsgCrypt) ComputeSignature(sToken string, sTimeStamp string, sNonce string, sMessage string) (ret int, sSignature string) {
 	if 0 == len(sToken) || 0 == len(sNonce) || 0 == len(sMessage) || 0 == len(sTimeStamp) {
@@ -243,24 +209,6 @@ func (this *WXBizMsgCrypt) ValidateSignature(sMsgSignature string, sTimeStamp st
 	return 0
 }
 
-// func (this *WXBizMsgCrypt) GenAesKeyFromEncodingKey(sEncodingKey string) (ret int, sAesKey string) {
-// 	if kEncodingKeySize != len(sEncodingKey) {
-// 		ret = -1
-// 		return
-// 	}
-
-// 	var sBase64 = sEncodingKey + "="
-// 	sAesKey0, err := base64.StdEncoding.DecodeString(sBase64)
-// 	if err != nil || kAesKeySize != len(sAesKey0) {
-// 		ret = -1
-// 		return
-// 	}
-
-// 	sAesKey = string(sAesKey0)
-// 	ret = 0
-// 	return
-// }
-
 func (this *WXBizMsgCrypt) GetEncryptMsg(sPostData string) (ret int, sEncryptMsg string) {
 	var vt VerifyTicketEncrypt
 	xml.Unmarshal([]byte(sPostData), &vt)
@@ -292,24 +240,9 @@ sRandStr.append(1, tempChar);
 }
 }
 }
+*/
 
-void WXBizMsgCrypt::GenNeedEncryptData(const std::string &sReplyMsg,std::string & sNeedEncrypt )
-{
-//random(16B)+ msg_len(4B) + msg + $AppId
-std::string sRandStr;
-GenRandStr(sRandStr,kRandEncryptStrLen);
-uint32_t iXmlSize = sReplyMsg.size();
-uint32_t iNSize  = htonl(iXmlSize);
-std::string sSize ;
-sSize.assign((const char *)&iNSize,sizeof(iNSize));
-
-sNeedEncrypt.erase();
-sNeedEncrypt = sRandStr;
-sNeedEncrypt += sSize;
-sNeedEncrypt += sReplyMsg;
-sNeedEncrypt += m_sAppid;
-}
-
+/*
 int WXBizMsgCrypt::SetOneFieldToXml(tinyxml2::XMLDocument * pDoc, tinyxml2::XMLNode* pXmlNode, const char * pcFieldName,
 const std::string & value, bool bIsCdata)
 {
@@ -336,54 +269,21 @@ pFiledElement->LinkEndChild(pText);
 pXmlNode->LinkEndChild(pFiledElement);
 return 0;
 }
-
-int WXBizMsgCrypt::GenReturnXml(const std::string & sEncryptMsg, const std::string & sSignature, const std::string & sTimeStamp,
-const std::string & sNonce, std::string & sResult)
-{
-tinyxml2::XMLPrinter oPrinter;
-tinyxml2::XMLNode* pXmlNode = NULL;
-tinyxml2::XMLDocument * pDoc = new tinyxml2::XMLDocument();
-if(NULL == pDoc)
-{
-return -1;
-}
-
-pXmlNode = pDoc->InsertEndChild( pDoc->NewElement( "xml" ) );
-if(NULL == pXmlNode)
-{
-DELETE_PTR(pDoc);
-return -1;
-}
-
-if(0 != SetOneFieldToXml(pDoc,pXmlNode,"Encrypt",sEncryptMsg,true))
-{
-DELETE_PTR(pDoc);
-return -1;
-}
-
-if(0 != SetOneFieldToXml(pDoc,pXmlNode,"MsgSignature",sSignature,true))
-{
-DELETE_PTR(pDoc);
-return -1;
-}
-
-if(0 != SetOneFieldToXml(pDoc,pXmlNode,"TimeStamp",sTimeStamp,true))
-{
-DELETE_PTR(pDoc);
-return -1;
-}
-
-if(0 != SetOneFieldToXml(pDoc,pXmlNode,"Nonce",sNonce,true))
-{
-DELETE_PTR(pDoc);
-return -1;
-}
-
-//ת��string
-pDoc->Accept(&oPrinter);
-sResult = oPrinter.CStr();
-
-DELETE_PTR(pDoc);
-return 0;
-}
 */
+
+func (this *WXBizMsgCrypt) GenReturnXml(sEncryptMsg string, sSignature string, sTimeStamp string, sNonce string) (ret int, sResult string) {
+
+	var msg MsgEncrypt
+	msg.Encrypt = sEncryptMsg
+	msg.MsgSignature = sSignature
+	msg.TimeStamp = sTimeStamp
+	msg.Nonce = sNonce
+	sr, err := json.Marshal(msg)
+	if err != nil {
+		ret = -1
+		return
+	}
+
+	sResult = string(sr)
+	return
+}
